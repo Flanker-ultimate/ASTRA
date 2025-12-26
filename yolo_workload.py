@@ -122,12 +122,12 @@ def parse_args():
     )
     parser.add_argument(
         "--input",
-        required=True,
+        default="/home/ubuntu/data/test",
         help="Input image file or directory",
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
+        default="tmp/yolo_ascend_output",
         help="Output directory for inference results",
     )
     parser.add_argument(

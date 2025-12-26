@@ -18,4 +18,4 @@ ACL_MEMCPY_DEVICE_TO_HOST = 2
 ACL_MEMCPY_DEVICE_TO_DEVICE = 3
 
 # images format
-IMG_EXT = ['.jpg', '.JPG', '.png', '.PNG', '.bmp', '.BMP', '.jpeg', '.JPEG']
+IMG_EXT = ['.jpg', '.JPG', '.png', '.PNG', '.bmp', '.BMP', '.jpeg', '.JPEG', '.tif', '.TIF']
