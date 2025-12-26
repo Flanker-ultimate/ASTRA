@@ -9,3 +9,14 @@ ASTRA/
 ├── recorder.py          # 负责日志记录和数据集生成
 └── utils.py             # 工具函数
 ```
+
+## Ascend YOLO workload
+
+Use `yolo_workload.py` to run YOLOv5 inference on Ascend NPU for a given image file or directory.
+
+```bash
+python yolo_workload.py \
+  --input /path/to/images \
+  --output-dir /path/to/output \
+  --output-format all
+```

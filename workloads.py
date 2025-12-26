@@ -121,6 +121,37 @@ class WorkloadExecutor:
             # 模拟 NPU 推理耗时
             time.sleep(0.05)
 
+    @staticmethod
+    def task_yolo_inference_ascend(
+        input_path,
+        output_dir,
+        output_format="all",
+        weights=None,
+        labels=None,
+        imgsz=(640, 640),
+        device=0,
+        conf_thres=0.25,
+        iou_thres=0.45,
+        max_det=1000,
+        agnostic_nms=False,
+    ):
+        """YOLO inference workload using Ascend NPU."""
+        from yolo_workload import run_inference
+
+        return run_inference(
+            input_path=input_path,
+            output_dir=output_dir,
+            output_format=output_format,
+            weights=weights,
+            labels=labels,
+            imgsz=imgsz,
+            device=device,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            max_det=max_det,
+            agnostic_nms=agnostic_nms,
+        )
+
     # ==========================================
     # 3. 全新的网络传输模拟 (HTTP & gRPC)
     # ==========================================
