@@ -12,13 +12,16 @@ class DataRecorder:
     def log_metric(self, metric_dict):
         self.metric_queue.put(metric_dict)
         
-    def log_event(self, task_type, action, task_id):
-        self.event_queue.put({
+    def log_event(self, task_type, action, task_id, details=None):
+        event = {
             "timestamp": time.time(),
             "task_id": task_id,
             "task_type": task_type,
             "action": action
-        })
+        }
+        if details:
+            event.update(details)
+        self.event_queue.put(event)
 
     def save_dataset(self, filename_prefix="ASTRA_Dataset"):
         print("\n[Recorder] Processing data and generating dataset...")

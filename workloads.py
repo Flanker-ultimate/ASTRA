@@ -134,6 +134,8 @@ class WorkloadExecutor:
         iou_thres=0.45,
         max_det=1000,
         agnostic_nms=False,
+        max_images=None,
+        progress_callback=None,
     ):
         """YOLO inference workload using Ascend NPU."""
         from yolo_workload import run_inference
@@ -150,6 +152,8 @@ class WorkloadExecutor:
             iou_thres=iou_thres,
             max_det=max_det,
             agnostic_nms=agnostic_nms,
+            max_images=max_images,
+            progress_callback=progress_callback,
         )
 
     # ==========================================

@@ -7,13 +7,25 @@ from workloads import WorkloadExecutor
 from recorder import DataRecorder
 
 class AstraController:
-    def __init__(self, simulation_mode=True):
+    def __init__(
+        self,
+        simulation_mode=True,
+        yolo_input_path="yolo_input",
+        yolo_output_dir="yolo_output",
+        yolo_output_format="all",
+        yolo_max_images=None,
+    ):
         self.recorder = DataRecorder()
         self.monitor = HardwareMonitor(use_simulation=simulation_mode)
         
         # 线程安全锁，用于统计当前活跃任务数供 Monitor 使用
         self.lock = threading.Lock()
         self.active_tasks_count = {'IO': 0, 'NET': 0, 'YOLO': 0}
+        self.yolo_task_state = {}
+        self.yolo_input_path = yolo_input_path
+        self.yolo_output_dir = yolo_output_dir
+        self.yolo_output_format = yolo_output_format
+        self.yolo_max_images = yolo_max_images
         
         self.running = True
 
@@ -26,6 +38,16 @@ class AstraController:
             
             # 2. 采集硬件数据
             metrics = self.monitor.get_metrics(snapshot)
+            with self.lock:
+                yolo_tasks = [
+                    {
+                        "task_id": task_id,
+                        "total_images": info["total_images"],
+                        "remaining_images": info["remaining_images"],
+                    }
+                    for task_id, info in self.yolo_task_state.items()
+                ]
+            metrics["yolo_tasks"] = yolo_tasks
             
             # 3. 记录
             self.recorder.log_metric(metrics)
@@ -33,14 +55,17 @@ class AstraController:
             # 4. 采样频率 2Hz (每0.5秒)
             time.sleep(0.5)
 
-    def _worker_wrapper(self, task_type, duration):
+    def _worker_wrapper(self, task_type, duration=None, **kwargs):
         """任务执行包装器 (处理日志和计数)"""
         task_id = str(uuid.uuid4())[:8]
         
         # START Event
         with self.lock:
             self.active_tasks_count[task_type] += 1
-        self.recorder.log_event(task_type, "START", task_id)
+        event_details = {}
+        if task_type == 'YOLO':
+            event_details = self._init_yolo_task_state(task_id, **kwargs)
+        self.recorder.log_event(task_type, "START", task_id, event_details)
         print(f"[{time.strftime('%H:%M:%S')}] START Task: {task_type} (ID: {task_id})")
         
         # Execution
@@ -49,17 +74,72 @@ class AstraController:
         elif task_type == 'NET':
             WorkloadExecutor.task_network_stress(duration)
         elif task_type == 'YOLO':
-            WorkloadExecutor.task_yolo_inference(duration)
+            self._run_yolo_task(task_id, **kwargs)
             
         # END Event
         with self.lock:
             self.active_tasks_count[task_type] -= 1
+        if task_type == 'YOLO':
+            self._finalize_yolo_task_state(task_id)
         self.recorder.log_event(task_type, "END", task_id)
         print(f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id})")
 
-    def dispatch_task(self, task_type, duration):
+    def _init_yolo_task_state(self, task_id, **kwargs):
+        from yolo_workload import collect_images
+
+        input_path = kwargs.get("input_path", self.yolo_input_path)
+        max_images = kwargs.get("max_images", self.yolo_max_images)
+        total_images = 0
+        try:
+            images, _ = collect_images(input_path, max_images=max_images)
+            total_images = len(images)
+        except Exception as exc:
+            print(f"[YOLO] Failed to scan images at {input_path}: {exc}")
+
+        with self.lock:
+            self.yolo_task_state[task_id] = {
+                "total_images": total_images,
+                "remaining_images": total_images,
+            }
+        return {"total_images": total_images}
+
+    def _update_yolo_task_state(self, task_id, processed, total):
+        remaining = max(total - processed, 0)
+        with self.lock:
+            self.yolo_task_state[task_id] = {
+                "total_images": total,
+                "remaining_images": remaining,
+            }
+
+    def _finalize_yolo_task_state(self, task_id):
+        with self.lock:
+            self.yolo_task_state.pop(task_id, None)
+
+    def _run_yolo_task(self, task_id, **kwargs):
+        input_path = kwargs.get("input_path", self.yolo_input_path)
+        output_dir = kwargs.get("output_dir", self.yolo_output_dir)
+        output_format = kwargs.get("output_format", self.yolo_output_format)
+        max_images = kwargs.get("max_images", self.yolo_max_images)
+
+        def progress_callback(processed, total):
+            self._update_yolo_task_state(task_id, processed, total)
+
+        try:
+            WorkloadExecutor.task_yolo_inference_ascend(
+                input_path=input_path,
+                output_dir=output_dir,
+                output_format=output_format,
+                max_images=max_images,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            print(f"[YOLO] Task {task_id} failed: {exc}")
+
+    def dispatch_task(self, task_type, duration=None, **kwargs):
         """派发任务到线程池"""
-        t = threading.Thread(target=self._worker_wrapper, args=(task_type, duration))
+        t = threading.Thread(
+            target=self._worker_wrapper, args=(task_type, duration), kwargs=kwargs
+        )
         t.start()
 
     def run_simulation(self, total_time=30):
@@ -82,7 +162,14 @@ class AstraController:
             # 10% 概率触发 YOLO (模拟发现目标)
             if dice < 0.1:
                 duration = random.randint(3, 8)
-                self.dispatch_task("YOLO", duration)
+                self.dispatch_task(
+                    "YOLO",
+                    duration,
+                    input_path=self.yolo_input_path,
+                    output_dir=self.yolo_output_dir,
+                    output_format=self.yolo_output_format,
+                    max_images=self.yolo_max_images,
+                )
                 
             # 20% 概率触发 网络传输 (模拟下行数据)
             elif dice < 0.3:

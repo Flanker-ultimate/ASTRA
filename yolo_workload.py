@@ -42,6 +42,16 @@ def _collect_images(input_path):
     return images, path
 
 
+def collect_images(input_path, max_images=None):
+    images, input_root = _collect_images(input_path)
+    if max_images is not None:
+        max_images = int(max_images)
+        if max_images <= 0:
+            raise ValueError("max_images must be a positive integer")
+        images = images[:max_images]
+    return images, input_root
+
+
 def run_inference(
     input_path,
     output_dir,
@@ -54,15 +64,16 @@ def run_inference(
     iou_thres=0.45,
     max_det=1000,
     agnostic_nms=False,
+    max_images=None,
+    progress_callback=None,
 ):
     if output_format not in {"label", "image", "all"}:
         raise ValueError(f"Unsupported output_format: {output_format}")
 
-    images, input_root = _collect_images(input_path)
+    images, input_root = collect_images(input_path, max_images=max_images)
     if not images:
         print(f"No images found under: {input_path}")
         return 0
-
     if weights is None:
         weights = DEFAULT_WEIGHTS
     if labels is None:
@@ -87,7 +98,10 @@ def run_inference(
         input_size = tuple(int(x) for x in imgsz)
 
         opt = SimpleNamespace(output_format=output_format)
+        total_images = len(images)
         processed = 0
+        if progress_callback is not None:
+            progress_callback(0, total_images)
         for image_path, rel_path in images:
             result, elapsed = process_image(
                 image_path,
@@ -107,6 +121,8 @@ def run_inference(
             processed += 1
             summary = result if result else "No detections"
             print(f"[{processed}/{len(images)}] {rel_path} -> {summary} ({elapsed:.3f}s)")
+            if progress_callback is not None:
+                progress_callback(processed, total_images)
         return processed
     finally:
         if net is not None:
@@ -182,6 +198,12 @@ def parse_args():
         action="store_true",
         help="Class-agnostic NMS",
     )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=None,
+        help="Maximum number of images to run inference on",
+    )
     return parser.parse_args()
 
 
@@ -199,6 +221,7 @@ def main():
         iou_thres=args.iou_thres,
         max_det=args.max_det,
         agnostic_nms=args.agnostic_nms,
+        max_images=args.max_images,
     )
 
 
