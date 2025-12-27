@@ -2,6 +2,8 @@ import time
 import uuid
 import threading
 import random
+import multiprocessing as mp
+import queue as py_queue
 from monitor import HardwareMonitor
 from workloads import WorkloadExecutor
 from recorder import DataRecorder
@@ -11,13 +13,15 @@ class AstraController:
         self,
         simulation_mode=True,
         yolo_input_path="yolo_input",
-        yolo_output_dir="yolo_output",
+        yolo_output_dir="tmp/yolo_workload",
         yolo_output_format="all",
         yolo_max_images=None,
         yolo_stop_grace=5.0,
+        yolo_max_concurrent=None,
     ):
         self.recorder = DataRecorder()
         self.monitor = HardwareMonitor(use_simulation=simulation_mode)
+        self.mp_context = mp.get_context("spawn")
         
         # 线程安全锁，用于统计当前活跃任务数供 Monitor 使用
         self.lock = threading.Lock()
@@ -28,7 +32,16 @@ class AstraController:
         self.yolo_output_format = yolo_output_format
         self.yolo_max_images = yolo_max_images
         self.yolo_stop_grace = yolo_stop_grace
-        self.yolo_stop_event = threading.Event()
+        self.yolo_stop_event = self.mp_context.Event()
+        self.yolo_max_concurrent = yolo_max_concurrent
+        if yolo_max_concurrent is None:
+            self.yolo_process_sema = None
+        else:
+            if int(yolo_max_concurrent) < 1:
+                raise ValueError("yolo_max_concurrent must be >= 1")
+            self.yolo_process_sema = threading.BoundedSemaphore(
+                int(yolo_max_concurrent)
+            )
         
         self.running = True
 
@@ -47,6 +60,9 @@ class AstraController:
                         "task_id": task_id,
                         "total_images": info["total_images"],
                         "remaining_images": info["remaining_images"],
+                        "thread_name": info.get("thread_name"),
+                        "thread_id": info.get("thread_id"),
+                        "process_id": info.get("process_id"),
                     }
                     for task_id, info in self.yolo_task_state.items()
                 ]
@@ -62,36 +78,71 @@ class AstraController:
         """任务执行包装器 (处理日志和计数)"""
         task_id = str(uuid.uuid4())[:8]
         
-        # START Event
-        with self.lock:
-            self.active_tasks_count[task_type] += 1
         event_details = {}
         if task_type == 'YOLO':
+            if self.yolo_process_sema:
+                self.yolo_process_sema.acquire()
             event_details = self._init_yolo_task_state(task_id, **kwargs)
-        self.recorder.log_event(task_type, "START", task_id, event_details)
-        print(f"[{time.strftime('%H:%M:%S')}] START Task: {task_type} (ID: {task_id})")
+        else:
+            with self.lock:
+                self.active_tasks_count[task_type] += 1
+            self.recorder.log_event(task_type, "START", task_id)
+            print(f"[{time.strftime('%H:%M:%S')}] START Task: {task_type} (ID: {task_id})")
         
         # Execution
         if task_type == 'IO':
             WorkloadExecutor.task_io_stress(duration)
+
+            with self.lock:
+                self.active_tasks_count[task_type] -= 1
+            self.recorder.log_event(task_type, "END", task_id)
+            print(f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id})")
         elif task_type == 'NET':
             WorkloadExecutor.task_network_stress(duration)
+
+            with self.lock:
+                self.active_tasks_count[task_type] -= 1
+            self.recorder.log_event(task_type, "END", task_id)
+            print(f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id})")
         elif task_type == 'YOLO':
-            self._run_yolo_task(task_id, **kwargs)
-            
-        # END Event
-        with self.lock:
-            self.active_tasks_count[task_type] -= 1
-        if task_type == 'YOLO':
-            self._finalize_yolo_task_state(task_id)
-        self.recorder.log_event(task_type, "END", task_id)
-        print(f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id})")
+            started = {"value": False}
+
+            def on_started(process_id):
+                with self.lock:
+                    self.active_tasks_count[task_type] += 1
+                started["value"] = True
+                details = dict(event_details)
+                details["process_id"] = process_id
+                self.recorder.log_event(task_type, "START", task_id, details)
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] START Task: {task_type} (ID: {task_id}, PID: {process_id})"
+                )
+
+            def on_finished(process_id):
+                if started["value"]:
+                    with self.lock:
+                        self.active_tasks_count[task_type] -= 1
+                details = {
+                    "process_id": process_id,
+                    "thread_name": event_details.get("thread_name"),
+                    "thread_id": event_details.get("thread_id"),
+                }
+                self.recorder.log_event(task_type, "END", task_id, details)
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id}, PID: {process_id})"
+                )
+                self._finalize_yolo_task_state(task_id)
+                if self.yolo_process_sema:
+                    self.yolo_process_sema.release()
+
+            self._run_yolo_task(task_id, on_started, on_finished, **kwargs)
 
     def _init_yolo_task_state(self, task_id, **kwargs):
         from yolo_workload import collect_images
 
         input_path = kwargs.get("input_path", self.yolo_input_path)
         max_images = kwargs.get("max_images", self.yolo_max_images)
+        thread = threading.current_thread()
         total_images = 0
         try:
             images, _ = collect_images(input_path, max_images=max_images)
@@ -103,41 +154,88 @@ class AstraController:
             self.yolo_task_state[task_id] = {
                 "total_images": total_images,
                 "remaining_images": total_images,
+                "thread_name": thread.name,
+                "thread_id": thread.ident,
+                "process_id": None,
             }
-        return {"total_images": total_images}
+        return {
+            "total_images": total_images,
+            "thread_name": thread.name,
+            "thread_id": thread.ident,
+        }
 
     def _update_yolo_task_state(self, task_id, processed, total):
         remaining = max(total - processed, 0)
         with self.lock:
-            self.yolo_task_state[task_id] = {
-                "total_images": total,
-                "remaining_images": remaining,
-            }
+            current = self.yolo_task_state.get(task_id, {})
+            current.update(
+                {
+                    "total_images": total,
+                    "remaining_images": remaining,
+                }
+            )
+            self.yolo_task_state[task_id] = current
+
+    def _set_yolo_process_info(self, task_id, process_id):
+        with self.lock:
+            current = self.yolo_task_state.get(task_id, {})
+            current["process_id"] = process_id
+            self.yolo_task_state[task_id] = current
 
     def _finalize_yolo_task_state(self, task_id):
         with self.lock:
             self.yolo_task_state.pop(task_id, None)
 
-    def _run_yolo_task(self, task_id, **kwargs):
+    def _run_yolo_task(self, task_id, on_started, on_finished, **kwargs):
+        from yolo_workload import run_inference_worker
+
         input_path = kwargs.get("input_path", self.yolo_input_path)
         output_dir = kwargs.get("output_dir", self.yolo_output_dir)
         output_format = kwargs.get("output_format", self.yolo_output_format)
         max_images = kwargs.get("max_images", self.yolo_max_images)
+        weights = kwargs.get("weights")
+        labels = kwargs.get("labels")
 
-        def progress_callback(processed, total):
-            self._update_yolo_task_state(task_id, processed, total)
-
+        progress_queue = self.mp_context.Queue()
+        process = None
         try:
-            WorkloadExecutor.task_yolo_inference_ascend(
-                input_path=input_path,
-                output_dir=output_dir,
-                output_format=output_format,
-                max_images=max_images,
-                progress_callback=progress_callback,
-                stop_event=self.yolo_stop_event,
+            process = self.mp_context.Process(
+                target=run_inference_worker,
+                kwargs={
+                    "input_path": input_path,
+                    "output_dir": output_dir,
+                    "output_format": output_format,
+                    "weights": weights,
+                    "labels": labels,
+                    "max_images": max_images,
+                    "progress_queue": progress_queue,
+                    "stop_event": self.yolo_stop_event,
+                },
             )
+            process.start()
+            self._set_yolo_process_info(task_id, process.pid)
+            on_started(process.pid)
+
+            while process.is_alive() or not progress_queue.empty():
+                try:
+                    msg_type, value, total = progress_queue.get(timeout=0.5)
+                except py_queue.Empty:
+                    continue
+
+                if msg_type == "progress":
+                    self._update_yolo_task_state(task_id, value, total)
+                elif msg_type == "error":
+                    print(f"[YOLO] Task {task_id} failed: {value}")
+                elif msg_type == "done":
+                    pass
         except Exception as exc:
             print(f"[YOLO] Task {task_id} failed: {exc}")
+        finally:
+            if process is not None:
+                process.join()
+                on_finished(process.pid)
+            else:
+                on_finished(None)
 
     def dispatch_task(self, task_type, duration=None, **kwargs):
         """派发任务到线程池"""
@@ -216,7 +314,7 @@ if __name__ == "__main__":
       app = AstraController(
           simulation_mode=False,              # 真实 Ascend 指标
           yolo_input_path="/home/ubuntu/data/test",
-          yolo_output_dir="tmp/yolo_ascend_output",
+          yolo_output_dir="tmp/yolo_workload",
           yolo_output_format="all",
           yolo_max_images=3000,                  # 每个 YOLO 任务最多推理 10 张
       )

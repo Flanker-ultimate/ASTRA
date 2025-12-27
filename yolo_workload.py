@@ -135,6 +135,50 @@ def run_inference(
             acl.finalize()
 
 
+def run_inference_worker(
+    input_path,
+    output_dir,
+    output_format="all",
+    weights=None,
+    labels=None,
+    imgsz=(640, 640),
+    device=0,
+    conf_thres=0.25,
+    iou_thres=0.45,
+    max_det=1000,
+    agnostic_nms=False,
+    max_images=None,
+    progress_queue=None,
+    stop_event=None,
+):
+    def _callback(processed, total):
+        if progress_queue is not None:
+            progress_queue.put(("progress", processed, total))
+
+    try:
+        processed = run_inference(
+            input_path=input_path,
+            output_dir=output_dir,
+            output_format=output_format,
+            weights=weights,
+            labels=labels,
+            imgsz=imgsz,
+            device=device,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            max_det=max_det,
+            agnostic_nms=agnostic_nms,
+            max_images=max_images,
+            progress_callback=_callback,
+            stop_event=stop_event,
+        )
+        if progress_queue is not None:
+            progress_queue.put(("done", processed, None))
+    except Exception as exc:
+        if progress_queue is not None:
+            progress_queue.put(("error", str(exc), None))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="YOLOv5 inference workload on Huawei Ascend NPU",
@@ -147,7 +191,7 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        default="tmp/yolo_ascend_output",
+        default="tmp/yolo_workload",
         help="Output directory for inference results",
     )
     parser.add_argument(

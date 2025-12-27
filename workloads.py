@@ -90,8 +90,10 @@ except Exception as e:
 # ==========================================
 
 class WorkloadExecutor:
-    # 定义模拟的大文件路径
-    TEMP_FILE = "satellite_temp_data.bin"
+    # 定义模拟的大文件路径（项目内 tmp 目录）
+    BASE_TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp")
+    IO_TMP_DIR = os.path.join(BASE_TMP_DIR, "io_workload")
+    TEMP_FILE = os.path.join(IO_TMP_DIR, "satellite_temp_data.bin")
     
     @staticmethod
     def task_io_stress(duration):
@@ -100,6 +102,7 @@ class WorkloadExecutor:
         # 50MB 数据
         data = os.urandom(1024 * 1024 * 50) 
         try:
+            os.makedirs(WorkloadExecutor.IO_TMP_DIR, exist_ok=True)
             while time.time() - start_time < duration:
                 with open(WorkloadExecutor.TEMP_FILE, "wb") as f:
                     f.write(data)
@@ -264,8 +267,11 @@ class WorkloadExecutor:
 
         @app.route('/shutdown', methods=['GET'])
         def shutdown():
-            request.environ.get('werkzeug.server.shutdown')()
-            return 'Server shutting down...'
+            shutdown_func = request.environ.get('werkzeug.server.shutdown')
+            if shutdown_func:
+                shutdown_func()
+                return 'Server shutting down...'
+            return 'Shutdown not supported', 200
 
         # 运行在线程中
         try:
