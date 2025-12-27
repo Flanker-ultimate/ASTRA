@@ -196,6 +196,7 @@ class WorkloadExecutor:
                 target=WorkloadExecutor._run_http_server, 
                 args=(port, server_stop_event)
             )
+        t_server.daemon = True
             
         t_server.start()
         time.sleep(1) # 等待 Server 就绪

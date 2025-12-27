@@ -20,6 +20,7 @@ class AstraController:
         yolo_stop_grace=5.0,
         yolo_max_concurrent=None,
         yolo_verbose=False,
+        yolo_shutdown_timeout=10.0,
     ):
         self.recorder = DataRecorder()
         self.monitor = HardwareMonitor(use_simulation=simulation_mode)
@@ -37,6 +38,9 @@ class AstraController:
         self.yolo_stop_event = self.mp_context.Event()
         self.yolo_max_concurrent = yolo_max_concurrent
         self.yolo_verbose = yolo_verbose
+        self.yolo_shutdown_timeout = yolo_shutdown_timeout
+        self.worker_threads = []
+        self.yolo_processes = {}
         if yolo_max_concurrent is None:
             self.yolo_process_sema = None
         else:
@@ -185,6 +189,14 @@ class AstraController:
             current["process_id"] = process_id
             self.yolo_task_state[task_id] = current
 
+    def _register_yolo_process(self, task_id, process):
+        with self.lock:
+            self.yolo_processes[task_id] = process
+
+    def _unregister_yolo_process(self, task_id):
+        with self.lock:
+            self.yolo_processes.pop(task_id, None)
+
     def _finalize_yolo_task_state(self, task_id):
         with self.lock:
             self.yolo_task_state.pop(task_id, None)
@@ -218,6 +230,7 @@ class AstraController:
                 },
             )
             process.start()
+            self._register_yolo_process(task_id, process)
             self._set_yolo_process_info(task_id, process.pid)
             on_started(process.pid)
 
@@ -239,6 +252,7 @@ class AstraController:
             if process is not None:
                 process.join()
                 on_finished(process.pid)
+                self._unregister_yolo_process(task_id)
             else:
                 on_finished(None)
 
@@ -247,6 +261,9 @@ class AstraController:
         t = threading.Thread(
             target=self._worker_wrapper, args=(task_type, duration), kwargs=kwargs
         )
+        t.daemon = True
+        with self.lock:
+            self.worker_threads.append(t)
         t.start()
 
     def run_simulation(self, total_time=30):
@@ -298,6 +315,7 @@ class AstraController:
         # 生成最终数据集
         self.recorder.save_dataset()
         self._stop_yolo_tasks_after_grace()
+        self._wait_for_workers()
 
     def _stop_yolo_tasks_after_grace(self):
         if self.yolo_stop_grace is None:
@@ -313,6 +331,36 @@ class AstraController:
         if self.yolo_task_state:
             print("[YOLO] Grace period elapsed, stopping remaining YOLO tasks.")
             self.yolo_stop_event.set()
+
+    def _wait_for_workers(self):
+        if self.yolo_shutdown_timeout is None:
+            return
+
+        deadline = time.time() + max(self.yolo_shutdown_timeout, 0)
+        while time.time() < deadline:
+            with self.lock:
+                alive_threads = [t for t in self.worker_threads if t.is_alive()]
+            if not alive_threads:
+                return
+            for thread in alive_threads:
+                thread.join(timeout=0.2)
+
+        self._terminate_yolo_processes()
+        with self.lock:
+            alive_threads = [t.name for t in self.worker_threads if t.is_alive()]
+        if alive_threads:
+            print(f"[Warning] Worker threads still running: {alive_threads}")
+
+    def _terminate_yolo_processes(self):
+        with self.lock:
+            processes = list(self.yolo_processes.items())
+        for task_id, process in processes:
+            if process.is_alive():
+                print(f"[YOLO] Forcing stop of task {task_id} (PID: {process.pid})")
+                process.terminate()
+                process.join(timeout=2.0)
+        with self.lock:
+            self.yolo_processes.clear()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
