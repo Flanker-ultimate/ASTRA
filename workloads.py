@@ -141,6 +141,7 @@ class WorkloadExecutor:
         progress_callback=None,
         stop_event=None,
         verbose=True,
+        file_prefix=None,
     ):
         """YOLO inference workload using Ascend NPU."""
         from yolo_workload import run_inference
@@ -161,6 +162,7 @@ class WorkloadExecutor:
             progress_callback=progress_callback,
             stop_event=stop_event,
             verbose=verbose,
+            file_prefix=file_prefix,
         )
 
     # ==========================================

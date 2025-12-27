@@ -5,11 +5,14 @@ import random
 import multiprocessing as mp
 import queue as py_queue
 import argparse
+import os
 from monitor import HardwareMonitor
 from workloads import WorkloadExecutor
 from recorder import DataRecorder
 
 class AstraController:
+    YOLO_TASK_PREFIX = "yolo_task_"
+
     def __init__(
         self,
         simulation_mode=True,
@@ -18,7 +21,7 @@ class AstraController:
         yolo_output_format="all",
         yolo_max_images=None,
         yolo_stop_grace=5.0,
-        yolo_max_concurrent=None,
+        yolo_max_concurrent=1,
         yolo_verbose=False,
         yolo_shutdown_timeout=10.0,
     ):
@@ -36,19 +39,19 @@ class AstraController:
         self.yolo_max_images = yolo_max_images
         self.yolo_stop_grace = yolo_stop_grace
         self.yolo_stop_event = self.mp_context.Event()
-        self.yolo_max_concurrent = yolo_max_concurrent
+        self.yolo_max_concurrent = 1 if yolo_max_concurrent is None else yolo_max_concurrent
         self.yolo_verbose = yolo_verbose
         self.yolo_shutdown_timeout = yolo_shutdown_timeout
         self.worker_threads = []
         self.yolo_processes = {}
-        if yolo_max_concurrent is None:
-            self.yolo_process_sema = None
-        else:
-            if int(yolo_max_concurrent) < 1:
-                raise ValueError("yolo_max_concurrent must be >= 1")
-            self.yolo_process_sema = threading.BoundedSemaphore(
-                int(yolo_max_concurrent)
-            )
+        self.yolo_stage_lock = threading.Lock()
+        if int(self.yolo_max_concurrent) < 1:
+            raise ValueError("yolo_max_concurrent must be >= 1")
+        if int(self.yolo_max_concurrent) != 1:
+            raise ValueError("yolo_max_concurrent must be 1 in single-process mode")
+        self.yolo_process_sema = threading.BoundedSemaphore(
+            int(self.yolo_max_concurrent)
+        )
         
         self.running = True
 
@@ -70,6 +73,9 @@ class AstraController:
                         "thread_name": info.get("thread_name"),
                         "thread_id": info.get("thread_id"),
                         "process_id": info.get("process_id"),
+                        "task_prefix": info.get("task_prefix"),
+                        "batch_start_time": info.get("batch_start_time"),
+                        "status": info.get("status"),
                     }
                     for task_id, info in self.yolo_task_state.items()
                 ]
@@ -87,9 +93,11 @@ class AstraController:
         
         event_details = {}
         if task_type == 'YOLO':
-            if self.yolo_process_sema:
-                self.yolo_process_sema.acquire()
             event_details = self._init_yolo_task_state(task_id, **kwargs)
+            self.recorder.log_event(task_type, "BATCH_START", task_id, event_details)
+            print(
+                f"[{time.strftime('%H:%M:%S')}] BATCH START Task: {task_type} (ID: {task_id})"
+            )
         else:
             with self.lock:
                 self.active_tasks_count[task_type] += 1
@@ -113,11 +121,15 @@ class AstraController:
             print(f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id})")
         elif task_type == 'YOLO':
             started = {"value": False}
+            task_prefix = event_details.get("task_prefix")
+            total_images = event_details.get("total_images", 0)
 
             def on_started(process_id):
-                with self.lock:
-                    self.active_tasks_count[task_type] += 1
-                started["value"] = True
+                if process_id is not None:
+                    with self.lock:
+                        self.active_tasks_count[task_type] += 1
+                    started["value"] = True
+                    self._update_yolo_task_meta(task_id, status="running")
                 details = dict(event_details)
                 details["process_id"] = process_id
                 self.recorder.log_event(task_type, "START", task_id, details)
@@ -133,29 +145,37 @@ class AstraController:
                     "process_id": process_id,
                     "thread_name": event_details.get("thread_name"),
                     "thread_id": event_details.get("thread_id"),
+                    "batch_end_time": time.time(),
                 }
                 self.recorder.log_event(task_type, "END", task_id, details)
                 print(
                     f"[{time.strftime('%H:%M:%S')}] END   Task: {task_type} (ID: {task_id}, PID: {process_id})"
                 )
                 self._finalize_yolo_task_state(task_id)
-                if self.yolo_process_sema:
-                    self.yolo_process_sema.release()
 
-            self._run_yolo_task(task_id, on_started, on_finished, **kwargs)
+            self._run_yolo_task(
+                task_id,
+                on_started,
+                on_finished,
+                task_prefix=task_prefix,
+                total_images=total_images,
+                **kwargs,
+            )
 
     def _init_yolo_task_state(self, task_id, **kwargs):
-        from yolo_workload import collect_images
-
         input_path = kwargs.get("input_path", self.yolo_input_path)
         max_images = kwargs.get("max_images", self.yolo_max_images)
+        batch_start_time = time.time()
+        task_prefix = f"{self.YOLO_TASK_PREFIX}{task_id}_"
         thread = threading.current_thread()
-        total_images = 0
         try:
-            images, _ = collect_images(input_path, max_images=max_images)
-            total_images = len(images)
+            with self.yolo_stage_lock:
+                total_images = self._stage_yolo_inputs(
+                    input_path, task_prefix, max_images
+                )
         except Exception as exc:
             print(f"[YOLO] Failed to scan images at {input_path}: {exc}")
+            total_images = 0
 
         with self.lock:
             self.yolo_task_state[task_id] = {
@@ -164,30 +184,32 @@ class AstraController:
                 "thread_name": thread.name,
                 "thread_id": thread.ident,
                 "process_id": None,
+                "task_prefix": task_prefix,
+                "batch_start_time": batch_start_time,
+                "status": "queued",
             }
         return {
             "total_images": total_images,
             "thread_name": thread.name,
             "thread_id": thread.ident,
+            "task_prefix": task_prefix,
+            "batch_start_time": batch_start_time,
         }
 
     def _update_yolo_task_state(self, task_id, processed, total):
         remaining = max(total - processed, 0)
+        self._update_yolo_task_meta(
+            task_id, total_images=total, remaining_images=remaining
+        )
+
+    def _update_yolo_task_meta(self, task_id, **fields):
         with self.lock:
             current = self.yolo_task_state.get(task_id, {})
-            current.update(
-                {
-                    "total_images": total,
-                    "remaining_images": remaining,
-                }
-            )
+            current.update(fields)
             self.yolo_task_state[task_id] = current
 
     def _set_yolo_process_info(self, task_id, process_id):
-        with self.lock:
-            current = self.yolo_task_state.get(task_id, {})
-            current["process_id"] = process_id
-            self.yolo_task_state[task_id] = current
+        self._update_yolo_task_meta(task_id, process_id=process_id)
 
     def _register_yolo_process(self, task_id, process):
         with self.lock:
@@ -201,7 +223,9 @@ class AstraController:
         with self.lock:
             self.yolo_task_state.pop(task_id, None)
 
-    def _run_yolo_task(self, task_id, on_started, on_finished, **kwargs):
+    def _run_yolo_task(
+        self, task_id, on_started, on_finished, task_prefix, total_images, **kwargs
+    ):
         from yolo_workload import run_inference_worker
 
         input_path = kwargs.get("input_path", self.yolo_input_path)
@@ -214,7 +238,20 @@ class AstraController:
 
         progress_queue = self.mp_context.Queue()
         process = None
+        sema_acquired = False
         try:
+            if total_images <= 0:
+                on_started(None)
+                return
+            if self.yolo_stop_event.is_set():
+                on_started(None)
+                return
+            if self.yolo_process_sema:
+                self.yolo_process_sema.acquire()
+                sema_acquired = True
+            if self.yolo_stop_event.is_set():
+                on_started(None)
+                return
             process = self.mp_context.Process(
                 target=run_inference_worker,
                 kwargs={
@@ -227,6 +264,7 @@ class AstraController:
                     "progress_queue": progress_queue,
                     "stop_event": self.yolo_stop_event,
                     "verbose": verbose,
+                    "file_prefix": task_prefix,
                 },
             )
             process.start()
@@ -255,6 +293,47 @@ class AstraController:
                 self._unregister_yolo_process(task_id)
             else:
                 on_finished(None)
+            if sema_acquired and self.yolo_process_sema:
+                self.yolo_process_sema.release()
+
+    def _stage_yolo_inputs(self, input_path, task_prefix, max_images):
+        from yolo_workload import collect_images
+
+        if not os.path.isdir(input_path):
+            return 0
+
+        images, _ = collect_images(input_path)
+        unassigned = []
+        for full_path, rel_path in images:
+            if os.path.basename(rel_path).startswith(self.YOLO_TASK_PREFIX):
+                continue
+            unassigned.append((full_path, rel_path))
+
+        if max_images is not None:
+            max_images = int(max_images)
+            if max_images <= 0:
+                raise ValueError("max_images must be a positive integer")
+            unassigned = unassigned[:max_images]
+
+        assigned = 0
+        for full_path, rel_path in unassigned:
+            dir_path = os.path.dirname(full_path)
+            base_name = os.path.basename(full_path)
+            new_name = f"{task_prefix}{base_name}"
+            new_path = os.path.join(dir_path, new_name)
+            if os.path.exists(new_path):
+                suffix = 1
+                while os.path.exists(new_path):
+                    new_name = f"{task_prefix}{suffix}_{base_name}"
+                    new_path = os.path.join(dir_path, new_name)
+                    suffix += 1
+            try:
+                os.replace(full_path, new_path)
+                assigned += 1
+            except OSError as exc:
+                print(f"[YOLO] Failed to stage {rel_path}: {exc}")
+
+        return assigned
 
     def dispatch_task(self, task_type, duration=None, **kwargs):
         """派发任务到线程池"""
@@ -369,8 +448,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--yolo-max-concurrent",
         type=int,
-        default=None,
-        help="Maximum number of concurrent YOLO tasks (processes)",
+        default=1,
+        help="Maximum number of concurrent YOLO tasks (processes), fixed to 1",
     )
     parser.add_argument(
         "--total-time",

@@ -42,8 +42,16 @@ def _collect_images(input_path):
     return images, path
 
 
-def collect_images(input_path, max_images=None):
+def _match_prefix(rel_path, file_prefix):
+    if not file_prefix:
+        return True
+    return os.path.basename(rel_path).startswith(file_prefix)
+
+
+def collect_images(input_path, max_images=None, file_prefix=None):
     images, input_root = _collect_images(input_path)
+    if file_prefix:
+        images = [item for item in images if _match_prefix(item[1], file_prefix)]
     if max_images is not None:
         max_images = int(max_images)
         if max_images <= 0:
@@ -68,11 +76,14 @@ def run_inference(
     progress_callback=None,
     stop_event=None,
     verbose=True,
+    file_prefix=None,
 ):
     if output_format not in {"label", "image", "all"}:
         raise ValueError(f"Unsupported output_format: {output_format}")
 
-    images, input_root = collect_images(input_path, max_images=max_images)
+    images, input_root = collect_images(
+        input_path, max_images=max_images, file_prefix=file_prefix
+    )
     if not images:
         print(f"No images found under: {input_path}")
         return 0
@@ -156,6 +167,7 @@ def run_inference_worker(
     progress_queue=None,
     stop_event=None,
     verbose=True,
+    file_prefix=None,
 ):
     def _callback(processed, total):
         if progress_queue is not None:
@@ -178,6 +190,7 @@ def run_inference_worker(
             progress_callback=_callback,
             stop_event=stop_event,
             verbose=verbose,
+            file_prefix=file_prefix,
         )
         if progress_queue is not None:
             progress_queue.put(("done", processed, None))
