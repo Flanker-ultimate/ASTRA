@@ -213,5 +213,11 @@ class AstraController:
 
 if __name__ == "__main__":
     # 如果在真实的 Ascend 开发板上运行，将 use_simulation 设为 False
-    app = AstraController(simulation_mode=True)
-    app.run_simulation(total_time=20) # 运行20秒测试
+      app = AstraController(
+          simulation_mode=False,              # 真实 Ascend 指标
+          yolo_input_path="/home/ubuntu/data/test",
+          yolo_output_dir="tmp/yolo_ascend_output",
+          yolo_output_format="all",
+          yolo_max_images=3000,                  # 每个 YOLO 任务最多推理 10 张
+      )
+      app.run_simulation(total_time=60)
