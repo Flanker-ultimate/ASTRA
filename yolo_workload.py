@@ -66,6 +66,7 @@ def run_inference(
     agnostic_nms=False,
     max_images=None,
     progress_callback=None,
+    stop_event=None,
 ):
     if output_format not in {"label", "image", "all"}:
         raise ValueError(f"Unsupported output_format: {output_format}")
@@ -103,6 +104,9 @@ def run_inference(
         if progress_callback is not None:
             progress_callback(0, total_images)
         for image_path, rel_path in images:
+            if stop_event is not None and stop_event.is_set():
+                print("Stop requested, ending inference early.")
+                break
             result, elapsed = process_image(
                 image_path,
                 rel_path,

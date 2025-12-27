@@ -14,6 +14,7 @@ class AstraController:
         yolo_output_dir="yolo_output",
         yolo_output_format="all",
         yolo_max_images=None,
+        yolo_stop_grace=5.0,
     ):
         self.recorder = DataRecorder()
         self.monitor = HardwareMonitor(use_simulation=simulation_mode)
@@ -26,6 +27,8 @@ class AstraController:
         self.yolo_output_dir = yolo_output_dir
         self.yolo_output_format = yolo_output_format
         self.yolo_max_images = yolo_max_images
+        self.yolo_stop_grace = yolo_stop_grace
+        self.yolo_stop_event = threading.Event()
         
         self.running = True
 
@@ -131,6 +134,7 @@ class AstraController:
                 output_format=output_format,
                 max_images=max_images,
                 progress_callback=progress_callback,
+                stop_event=self.yolo_stop_event,
             )
         except Exception as exc:
             print(f"[YOLO] Task {task_id} failed: {exc}")
@@ -145,6 +149,7 @@ class AstraController:
     def run_simulation(self, total_time=30):
         print(f"=== ASTRA Simulation Started (Mode: {'SIM' if self.monitor.use_simulation else 'REAL'}) ===")
         print(f"Duration: {total_time} seconds")
+        self.yolo_stop_event.clear()
         
         # 启动监控线程
         monitor_thread = threading.Thread(target=self._monitor_loop)
@@ -189,6 +194,22 @@ class AstraController:
         
         # 生成最终数据集
         self.recorder.save_dataset()
+        self._stop_yolo_tasks_after_grace()
+
+    def _stop_yolo_tasks_after_grace(self):
+        if self.yolo_stop_grace is None:
+            return
+
+        deadline = time.time() + max(self.yolo_stop_grace, 0)
+        while time.time() < deadline:
+            with self.lock:
+                if not self.yolo_task_state:
+                    return
+            time.sleep(0.2)
+
+        if self.yolo_task_state:
+            print("[YOLO] Grace period elapsed, stopping remaining YOLO tasks.")
+            self.yolo_stop_event.set()
 
 if __name__ == "__main__":
     # 如果在真实的 Ascend 开发板上运行，将 use_simulation 设为 False
