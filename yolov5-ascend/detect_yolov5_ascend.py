@@ -522,6 +522,7 @@ def process_image(
     opt,
     input_dir,
     output_dir,
+    verbose=True,
 ):
     """Process a single image and save results."""
     t1 = time.perf_counter()
@@ -530,9 +531,10 @@ def process_image(
     org_img, image_npy, image_bytes = preprocess(
         image_path, input_shape=input_size, image_format="BGR", channel_first=True
     )
-    print(
-        f"Received image: {rel_path}, original size = {org_img.shape[1]}x{org_img.shape[0]}"
-    )
+    if verbose:
+        print(
+            f"Received image: {rel_path}, original size = {org_img.shape[1]}x{org_img.shape[0]}"
+        )
 
     result = net.run([image_bytes])
     pred = np.frombuffer(bytearray(result[0]), dtype=np.float32)

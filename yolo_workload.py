@@ -67,6 +67,7 @@ def run_inference(
     max_images=None,
     progress_callback=None,
     stop_event=None,
+    verbose=True,
 ):
     if output_format not in {"label", "image", "all"}:
         raise ValueError(f"Unsupported output_format: {output_format}")
@@ -121,10 +122,14 @@ def run_inference(
                 opt,
                 str(input_root),
                 str(output_dir),
+                verbose=verbose,
             )
             processed += 1
-            summary = result if result else "No detections"
-            print(f"[{processed}/{len(images)}] {rel_path} -> {summary} ({elapsed:.3f}s)")
+            if verbose:
+                summary = result if result else "No detections"
+                print(
+                    f"[{processed}/{len(images)}] {rel_path} -> {summary} ({elapsed:.3f}s)"
+                )
             if progress_callback is not None:
                 progress_callback(processed, total_images)
         return processed
@@ -150,6 +155,7 @@ def run_inference_worker(
     max_images=None,
     progress_queue=None,
     stop_event=None,
+    verbose=True,
 ):
     def _callback(processed, total):
         if progress_queue is not None:
@@ -171,6 +177,7 @@ def run_inference_worker(
             max_images=max_images,
             progress_callback=_callback,
             stop_event=stop_event,
+            verbose=verbose,
         )
         if progress_queue is not None:
             progress_queue.put(("done", processed, None))
@@ -199,6 +206,11 @@ def parse_args():
         choices=["label", "image", "all"],
         default="all",
         help="Output format for results",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-image logs",
     )
     parser.add_argument(
         "--weights",
@@ -270,6 +282,7 @@ def main():
         max_det=args.max_det,
         agnostic_nms=args.agnostic_nms,
         max_images=args.max_images,
+        verbose=not args.quiet,
     )
 
 

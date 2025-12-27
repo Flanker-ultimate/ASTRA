@@ -4,6 +4,7 @@ import threading
 import random
 import multiprocessing as mp
 import queue as py_queue
+import argparse
 from monitor import HardwareMonitor
 from workloads import WorkloadExecutor
 from recorder import DataRecorder
@@ -18,6 +19,7 @@ class AstraController:
         yolo_max_images=None,
         yolo_stop_grace=5.0,
         yolo_max_concurrent=None,
+        yolo_verbose=False,
     ):
         self.recorder = DataRecorder()
         self.monitor = HardwareMonitor(use_simulation=simulation_mode)
@@ -34,6 +36,7 @@ class AstraController:
         self.yolo_stop_grace = yolo_stop_grace
         self.yolo_stop_event = self.mp_context.Event()
         self.yolo_max_concurrent = yolo_max_concurrent
+        self.yolo_verbose = yolo_verbose
         if yolo_max_concurrent is None:
             self.yolo_process_sema = None
         else:
@@ -195,6 +198,7 @@ class AstraController:
         max_images = kwargs.get("max_images", self.yolo_max_images)
         weights = kwargs.get("weights")
         labels = kwargs.get("labels")
+        verbose = kwargs.get("verbose", self.yolo_verbose)
 
         progress_queue = self.mp_context.Queue()
         process = None
@@ -210,6 +214,7 @@ class AstraController:
                     "max_images": max_images,
                     "progress_queue": progress_queue,
                     "stop_event": self.yolo_stop_event,
+                    "verbose": verbose,
                 },
             )
             process.start()
@@ -310,12 +315,30 @@ class AstraController:
             self.yolo_stop_event.set()
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="ASTRA scheduler with optional YOLO concurrency control"
+    )
+    parser.add_argument(
+        "--yolo-max-concurrent",
+        type=int,
+        default=None,
+        help="Maximum number of concurrent YOLO tasks (processes)",
+    )
+    parser.add_argument(
+        "--total-time",
+        type=int,
+        default=60,
+        help="Simulation duration in seconds",
+    )
+    args = parser.parse_args()
+
     # 如果在真实的 Ascend 开发板上运行，将 use_simulation 设为 False
-      app = AstraController(
-          simulation_mode=False,              # 真实 Ascend 指标
-          yolo_input_path="/home/ubuntu/data/test",
-          yolo_output_dir="tmp/yolo_workload",
-          yolo_output_format="all",
-          yolo_max_images=3000,                  # 每个 YOLO 任务最多推理 10 张
-      )
-      app.run_simulation(total_time=60)
+    app = AstraController(
+        simulation_mode=False,  # 真实 Ascend 指标
+        yolo_input_path="/home/ubuntu/data/test",
+        yolo_output_dir="tmp/yolo_workload",
+        yolo_output_format="all",
+        yolo_max_images=3000,  # 每个 YOLO 任务最多推理 10 张
+        yolo_max_concurrent=args.yolo_max_concurrent,
+    )
+    app.run_simulation(total_time=args.total_time)

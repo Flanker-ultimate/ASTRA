@@ -140,6 +140,7 @@ class WorkloadExecutor:
         max_images=None,
         progress_callback=None,
         stop_event=None,
+        verbose=True,
     ):
         """YOLO inference workload using Ascend NPU."""
         from yolo_workload import run_inference
@@ -159,6 +160,7 @@ class WorkloadExecutor:
             max_images=max_images,
             progress_callback=progress_callback,
             stop_event=stop_event,
+            verbose=verbose,
         )
 
     # ==========================================
