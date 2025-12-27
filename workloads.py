@@ -93,7 +93,6 @@ class WorkloadExecutor:
     # 定义模拟的大文件路径（项目内 tmp 目录）
     BASE_TMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tmp")
     IO_TMP_DIR = os.path.join(BASE_TMP_DIR, "io_workload")
-    TEMP_FILE = os.path.join(IO_TMP_DIR, "satellite_temp_data.bin")
     
     @staticmethod
     def task_io_stress(duration):
@@ -101,16 +100,20 @@ class WorkloadExecutor:
         start_time = time.time()
         # 50MB 数据
         data = os.urandom(1024 * 1024 * 50) 
+        temp_file = os.path.join(
+            WorkloadExecutor.IO_TMP_DIR,
+            f"satellite_temp_data_{threading.get_ident()}_{int(time.time() * 1000)}.bin",
+        )
         try:
             os.makedirs(WorkloadExecutor.IO_TMP_DIR, exist_ok=True)
             while time.time() - start_time < duration:
-                with open(WorkloadExecutor.TEMP_FILE, "wb") as f:
+                with open(temp_file, "wb") as f:
                     f.write(data)
-                with open(WorkloadExecutor.TEMP_FILE, "rb") as f:
+                with open(temp_file, "rb") as f:
                     _ = f.read()
         finally:
-            if os.path.exists(WorkloadExecutor.TEMP_FILE):
-                os.remove(WorkloadExecutor.TEMP_FILE)
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
 
     @staticmethod
     def task_yolo_inference(duration):
