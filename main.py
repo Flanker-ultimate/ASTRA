@@ -105,5 +105,5 @@ class AstraController:
 
 if __name__ == "__main__":
     # 如果在真实的 Ascend 开发板上运行，将 use_simulation 设为 False
-    app = AstraController(simulation_mode=True)
+    app = AstraController(simulation_mode=False)
     app.run_simulation(total_time=20) # 运行20秒测试
