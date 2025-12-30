@@ -3,6 +3,7 @@
 import argparse
 import os
 import sys
+import queue as py_queue
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,6 +59,79 @@ def collect_images(input_path, max_images=None, file_prefix=None):
             raise ValueError("max_images must be a positive integer")
         images = images[:max_images]
     return images, input_root
+
+
+def _strip_yolo_task_prefix(name, task_prefix_base):
+    if not name.startswith(task_prefix_base):
+        return name
+    remainder = name[len(task_prefix_base):]
+    parts = remainder.split("_", 1)
+    if len(parts) == 2 and parts[0]:
+        return parts[1]
+    return remainder or name
+
+
+def stage_yolo_inputs(input_path, task_prefix, max_images, task_prefix_base):
+    if not os.path.isdir(input_path):
+        return 0
+
+    images, _ = collect_images(input_path)
+    unassigned = []
+    prefixed = []
+    for full_path, rel_path in images:
+        if os.path.basename(rel_path).startswith(task_prefix_base):
+            prefixed.append((full_path, rel_path))
+        else:
+            unassigned.append((full_path, rel_path))
+
+    reuse_prefixed = False
+    if not unassigned:
+        if not prefixed:
+            print(f"[YOLO] No images available under {input_path}")
+            return 0
+        unassigned = prefixed
+        reuse_prefixed = True
+
+    if max_images is not None:
+        max_images = int(max_images)
+        if max_images <= 0:
+            raise ValueError("max_images must be a positive integer")
+        unassigned = unassigned[:max_images]
+
+    assigned = 0
+    for full_path, rel_path in unassigned:
+        dir_path = os.path.dirname(full_path)
+        base_name = os.path.basename(full_path)
+        if reuse_prefixed:
+            base_name = _strip_yolo_task_prefix(base_name, task_prefix_base)
+        new_name = f"{task_prefix}{base_name}"
+        new_path = os.path.join(dir_path, new_name)
+        if new_path == full_path:
+            assigned += 1
+            continue
+        if os.path.exists(new_path):
+            suffix = 1
+            while os.path.exists(new_path):
+                new_name = f"{task_prefix}{suffix}_{base_name}"
+                new_path = os.path.join(dir_path, new_name)
+                suffix += 1
+        try:
+            os.replace(full_path, new_path)
+            assigned += 1
+        except OSError as exc:
+            print(f"[YOLO] Failed to stage {rel_path}: {exc}")
+
+    return assigned
+
+
+def enqueue_yolo_task(task_queue, task, on_drop=None):
+    try:
+        task_queue.put_nowait(task)
+        return True
+    except py_queue.Full:
+        if on_drop is not None:
+            on_drop()
+        return False
 
 
 def run_inference(
@@ -197,6 +271,86 @@ def run_inference_worker(
     except Exception as exc:
         if progress_queue is not None:
             progress_queue.put(("error", str(exc), None))
+
+
+def yolo_worker_loop(task_queue, status_queue, stop_event, task_prefix_base):
+    import queue as local_queue
+
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            task = task_queue.get(timeout=0.5)
+        except local_queue.Empty:
+            continue
+        if task is None:
+            break
+
+        task_id = task.get("task_id")
+        input_path = task.get("input_path")
+        output_dir = task.get("output_dir")
+        output_format = task.get("output_format")
+        max_images = task.get("max_images")
+        weights = task.get("weights")
+        labels = task.get("labels")
+        imgsz = task.get("imgsz")
+        device = task.get("device", 0)
+        conf_thres = task.get("conf_thres", 0.25)
+        iou_thres = task.get("iou_thres", 0.45)
+        max_det = task.get("max_det", 1000)
+        agnostic_nms = task.get("agnostic_nms", False)
+        verbose = task.get("verbose", True)
+        task_prefix = task.get("task_prefix")
+
+        try:
+            total_images = stage_yolo_inputs(
+                input_path, task_prefix, max_images, task_prefix_base
+            )
+            status_queue.put(
+                (
+                    "start",
+                    task_id,
+                    {"process_id": os.getpid(), "total_images": total_images},
+                )
+            )
+            if total_images <= 0:
+                status_queue.put(
+                    ("done", task_id, {"processed": 0, "total_images": total_images})
+                )
+                continue
+
+            def _callback(processed, total):
+                status_queue.put(
+                    ("progress", task_id, {"processed": processed, "total": total})
+                )
+
+            processed = run_inference(
+                input_path=input_path,
+                output_dir=output_dir,
+                output_format=output_format,
+                weights=weights,
+                labels=labels,
+                imgsz=imgsz,
+                device=device,
+                conf_thres=conf_thres,
+                iou_thres=iou_thres,
+                max_det=max_det,
+                agnostic_nms=agnostic_nms,
+                max_images=max_images,
+                progress_callback=_callback,
+                stop_event=stop_event,
+                verbose=verbose,
+                file_prefix=task_prefix,
+            )
+            status_queue.put(
+                (
+                    "done",
+                    task_id,
+                    {"processed": processed, "total_images": total_images},
+                )
+            )
+        except Exception as exc:
+            status_queue.put(("error", task_id, {"error": str(exc)}))
 
 
 def parse_args():
