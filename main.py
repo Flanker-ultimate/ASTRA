@@ -122,8 +122,6 @@ class AstraController:
         elif task_type == 'YOLO':
             started = {"value": False}
             task_prefix = event_details.get("task_prefix")
-            total_images = event_details.get("total_images", 0)
-
             def on_started(process_id):
                 if process_id is not None:
                     with self.lock:
@@ -158,7 +156,6 @@ class AstraController:
                 on_started,
                 on_finished,
                 task_prefix=task_prefix,
-                total_images=total_images,
                 **kwargs,
             )
 
@@ -169,10 +166,26 @@ class AstraController:
         task_prefix = f"{self.YOLO_TASK_PREFIX}{task_id}_"
         thread = threading.current_thread()
         try:
-            with self.yolo_stage_lock:
-                total_images = self._stage_yolo_inputs(
-                    input_path, task_prefix, max_images
-                )
+            from yolo_workload import collect_images
+
+            total_images = 0
+            images, _ = collect_images(input_path)
+            unassigned = []
+            prefixed = []
+            for _, rel_path in images:
+                if os.path.basename(rel_path).startswith(self.YOLO_TASK_PREFIX):
+                    prefixed.append(rel_path)
+                else:
+                    unassigned.append(rel_path)
+            if unassigned:
+                total_images = len(unassigned)
+            else:
+                total_images = len(prefixed)
+            if max_images is not None:
+                max_images = int(max_images)
+                if max_images <= 0:
+                    raise ValueError("max_images must be a positive integer")
+                total_images = min(total_images, max_images)
         except Exception as exc:
             print(f"[YOLO] Failed to scan images at {input_path}: {exc}")
             total_images = 0
@@ -224,7 +237,7 @@ class AstraController:
             self.yolo_task_state.pop(task_id, None)
 
     def _run_yolo_task(
-        self, task_id, on_started, on_finished, task_prefix, total_images, **kwargs
+        self, task_id, on_started, on_finished, task_prefix, **kwargs
     ):
         from yolo_workload import run_inference_worker
 
@@ -240,9 +253,6 @@ class AstraController:
         process = None
         sema_acquired = False
         try:
-            if total_images <= 0:
-                on_started(None)
-                return
             if self.yolo_stop_event.is_set():
                 on_started(None)
                 return
@@ -250,6 +260,14 @@ class AstraController:
                 self.yolo_process_sema.acquire()
                 sema_acquired = True
             if self.yolo_stop_event.is_set():
+                on_started(None)
+                return
+            with self.yolo_stage_lock:
+                total_images = self._stage_yolo_inputs(
+                    input_path, task_prefix, max_images
+                )
+            self._update_yolo_task_state(task_id, 0, total_images)
+            if total_images <= 0:
                 on_started(None)
                 return
             process = self.mp_context.Process(
