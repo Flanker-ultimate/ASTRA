@@ -304,10 +304,20 @@ class AstraController:
 
         images, _ = collect_images(input_path)
         unassigned = []
+        prefixed = []
         for full_path, rel_path in images:
             if os.path.basename(rel_path).startswith(self.YOLO_TASK_PREFIX):
-                continue
-            unassigned.append((full_path, rel_path))
+                prefixed.append((full_path, rel_path))
+            else:
+                unassigned.append((full_path, rel_path))
+
+        reuse_prefixed = False
+        if not unassigned:
+            if not prefixed:
+                print(f"[YOLO] No images available under {input_path}")
+                return 0
+            unassigned = prefixed
+            reuse_prefixed = True
 
         if max_images is not None:
             max_images = int(max_images)
@@ -319,8 +329,13 @@ class AstraController:
         for full_path, rel_path in unassigned:
             dir_path = os.path.dirname(full_path)
             base_name = os.path.basename(full_path)
+            if reuse_prefixed:
+                base_name = self._strip_yolo_task_prefix(base_name)
             new_name = f"{task_prefix}{base_name}"
             new_path = os.path.join(dir_path, new_name)
+            if new_path == full_path:
+                assigned += 1
+                continue
             if os.path.exists(new_path):
                 suffix = 1
                 while os.path.exists(new_path):
@@ -334,6 +349,15 @@ class AstraController:
                 print(f"[YOLO] Failed to stage {rel_path}: {exc}")
 
         return assigned
+
+    def _strip_yolo_task_prefix(self, name):
+        if not name.startswith(self.YOLO_TASK_PREFIX):
+            return name
+        remainder = name[len(self.YOLO_TASK_PREFIX):]
+        parts = remainder.split("_", 1)
+        if len(parts) == 2 and parts[0]:
+            return parts[1]
+        return remainder or name
 
     def dispatch_task(self, task_type, duration=None, **kwargs):
         """派发任务到线程池"""
